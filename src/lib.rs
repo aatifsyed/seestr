@@ -19,67 +19,96 @@ use core::{
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-/// Pointer-wide, owned handle to a `nul`-terminated, [`libc::malloc`]-ed buffer.
+/// Pointer-wide, owned handle to a `nul`-terminated,
+/// [`malloc`](libc::malloc)-ed buffer,
+/// which is [`free`](libc::free)-ed on [`Drop`].
+///
+/// The allocator is pluggable - see [`Allocator`].
 #[repr(transparent)]
-pub struct Buf {
+pub struct Buf<A: Allocator = Libc> {
     ptr: NonNull<u8>,
+    alloc: PhantomData<A>,
 }
 
+/// Operations with [`libc::malloc`].
 impl Buf {
     /// # Safety
     /// - `ptr` must not be null.
     /// - Invariants on [`Buf`] must be upheld.
-    pub const unsafe fn from_ptr(ptr: *mut c_char) -> Self {
-        Self {
-            ptr: NonNull::new_unchecked(ptr.cast()),
-        }
+    pub unsafe fn from_ptr(ptr: *mut c_char) -> Self {
+        Self::from_ptr_in(ptr)
     }
-    /// Copy `c` into the heap.
+    /// Copy `src` into the heap.
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
-    pub fn new(c: &CStr) -> Self {
-        Self::of_bytes(c.to_bytes())
-    }
-    /// This will add a nul terminator.
-    ///
-    /// If `b` contains an interior `0`,
-    /// future methods on this [`Buf`] will act truncated.
-    #[cfg(feature = "alloc")]
-    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
-    pub fn of_bytes(b: &[u8]) -> Self {
-        match Self::try_of_bytes(b) {
-            Ok(it) => it,
-            Err(e) => e.handle(),
-        }
-    }
-    /// Copies `b` to the heap, appending an nul terminator.
-    ///
-    /// If `b` contains an interior `0`,
-    /// future methods on this [`Buf`] will act truncated.
-    ///
-    /// # Panics
-    /// - if `b`s len is [`usize::MAX`].
-    pub fn try_of_bytes(b: &[u8]) -> Result<Self, AllocError> {
-        let (len, overflow) = b.len().overflowing_add(1);
-        assert!(!overflow, "huge slice");
-        let ptr = NonNull::new(unsafe { libc::malloc(len) })
-            .ok_or(AllocError(len))?
-            .cast::<u8>();
-        unsafe {
-            ptr.copy_from_nonoverlapping(NonNull::new_unchecked(b.as_ptr().cast_mut()), b.len());
-            ptr.add(b.len()).write(0);
-        };
-        Ok(Self { ptr })
+    pub fn new(src: &CStr) -> Self {
+        Self::new_in(src)
     }
     /// Allocate a buffer of `len + 1`,
     /// passing a buffer of length `len` to the given function for initialization.
+    ///
+    /// If `f` writes (any) zeroes to the given buffer,
+    /// future methods on this [`Buf`] will act truncated.
     ///
     /// # Panics
     /// - if `len` is [`usize::MAX`].
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
     pub fn with(len: usize, f: impl FnOnce(&mut [u8])) -> Self {
-        match Self::try_with(len, f) {
+        Self::with_in(len, f)
+    }
+}
+
+#[expect(
+    clippy::missing_safety_doc,
+    reason = "safety is documented on the specialised impl"
+)]
+impl<A: Allocator> Buf<A> {
+    /// See [`Self::from_ptr`].
+    pub unsafe fn from_ptr_in(ptr: *mut c_char) -> Self {
+        Self {
+            ptr: NonNull::new_unchecked(ptr.cast()),
+            alloc: PhantomData,
+        }
+    }
+    /// See [`Self::new`].
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+    pub fn new_in(src: &CStr) -> Self {
+        Self::from_bytes_in(src.to_bytes())
+    }
+    /// This will add a nul terminator.
+    ///
+    /// If `src` contains an interior `0`,
+    /// future methods on this [`Buf`] will act truncated.
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+    pub fn from_bytes_in(src: &[u8]) -> Self {
+        match Self::try_of_bytes_in(src) {
+            Ok(it) => it,
+            Err(e) => e.handle(),
+        }
+    }
+    /// Copies `src` to the heap, appending an nul terminator.
+    ///
+    /// If `src` contains an interior `0`,
+    /// future methods on this [`Buf`] will act truncated.
+    ///
+    /// # Panics
+    /// - if `b`s len is [`usize::MAX`].
+    pub fn try_of_bytes_in(src: &[u8]) -> Result<Self, AllocError> {
+        unsafe {
+            Self::try_with_uninit_in(src.len(), |dst| {
+                debug_assert_eq!(src.len(), dst.len());
+                ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), dst.len());
+            })
+        }
+    }
+    /// See [`Self::with`].
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+    pub fn with_in(len: usize, f: impl FnOnce(&mut [u8])) -> Self {
+        match Self::try_with_in(len, f) {
             Ok(it) => it,
             Err(e) => e.handle(),
         }
@@ -89,9 +118,9 @@ impl Buf {
     ///
     /// # Panics
     /// - if `len` is [`usize::MAX`].
-    pub fn try_with(len: usize, f: impl FnOnce(&mut [u8])) -> Result<Self, AllocError> {
+    pub fn try_with_in(len: usize, f: impl FnOnce(&mut [u8])) -> Result<Self, AllocError> {
         unsafe {
-            Self::try_with_uninit(len, |it| {
+            Self::try_with_uninit_in(len, |it| {
                 let ptr = it.as_mut_ptr();
                 let len = it.len();
                 ptr::write_bytes(ptr, 0, len);
@@ -107,36 +136,39 @@ impl Buf {
     ///
     /// # Panics
     /// - if `len` is [`usize::MAX`].
-    pub unsafe fn try_with_uninit(
+    pub unsafe fn try_with_uninit_in(
         len: usize,
         f: impl FnOnce(&mut [MaybeUninit<u8>]),
     ) -> Result<Self, AllocError> {
         let (len_with_nul, overflow) = len.overflowing_add(1);
         assert!(!overflow, "huge slice");
-        let ptr = NonNull::new(unsafe { libc::malloc(len_with_nul) })
+        let ptr = A::alloc(len_with_nul)
             .ok_or(AllocError(len_with_nul))?
             .cast::<u8>();
         unsafe { ptr.add(len).write(0) }; // terminate
         let uninit =
             unsafe { slice::from_raw_parts_mut(ptr.cast::<MaybeUninit<u8>>().as_ptr(), len) };
         f(uninit);
-        Ok(Self { ptr })
+        Ok(Self {
+            ptr,
+            alloc: PhantomData,
+        })
     }
 }
 
-impl Drop for Buf {
+impl<A: Allocator> Drop for Buf<A> {
     fn drop(&mut self) {
-        unsafe { libc::free(self.ptr.as_ptr().cast()) }
+        A::free(self.ptr);
     }
 }
 
-impl ops::Deref for Buf {
+impl<A: Allocator> ops::Deref for Buf<A> {
     type Target = Mut<'static>;
     fn deref(&self) -> &Self::Target {
         unsafe { mem::transmute(self) }
     }
 }
-impl ops::DerefMut for Buf {
+impl<A: Allocator> ops::DerefMut for Buf<A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { mem::transmute(self) }
     }
@@ -191,6 +223,9 @@ impl<'a> Ref<'a> {
             life: PhantomData,
         }
     }
+    pub fn as_ptr(&self) -> *const c_char {
+        self.ptr.as_ptr().cast()
+    }
 }
 
 impl fmt::Debug for Ref<'_> {
@@ -204,7 +239,6 @@ impl fmt::Debug for Ref<'_> {
         Ok(())
     }
 }
-
 impl fmt::Display for Ref<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for chunk in self.bytes().utf8_chunks() {
@@ -216,7 +250,6 @@ impl fmt::Display for Ref<'_> {
         Ok(())
     }
 }
-
 impl PartialEq for Ref<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.bytes() == other.bytes()
@@ -238,7 +271,6 @@ impl PartialOrd for Ref<'_> {
         Some(self.cmp(other))
     }
 }
-
 impl AsRef<[u8]> for Ref<'_> {
     fn as_ref(&self) -> &[u8] {
         self.bytes()
@@ -280,6 +312,9 @@ impl<'a> Mut<'a> {
     pub unsafe fn bytes_with_nul_mut(&mut self) -> &mut [u8] {
         unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len_with_nul()) }
     }
+    pub fn as_mut_ptr(&mut self) -> *mut c_char {
+        self.ptr.as_ptr().cast()
+    }
 }
 
 impl<'a> ops::Deref for Mut<'a> {
@@ -290,64 +325,75 @@ impl<'a> ops::Deref for Mut<'a> {
 }
 
 macro_rules! forward_traits {
-    ($ty:ty) => {
-        impl fmt::Debug for $ty {
+    (<$gen1:tt $(: $bound:ident)?>$ty:ident<$gen2:tt>) => {
+        impl<$gen1 $(: $bound)?> fmt::Debug for $ty<$gen2> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 <Ref as fmt::Debug>::fmt(self, f)
             }
         }
-        impl fmt::Display for $ty {
+        impl<$gen1 $(: $bound)?> fmt::Display for $ty<$gen2> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 <Ref as fmt::Display>::fmt(self, f)
             }
         }
-        impl PartialEq for $ty {
-            fn eq(&self, other: &Self) -> bool {
-                <Ref as PartialEq>::eq(self, other)
-            }
-        }
-        impl Eq for $ty {}
-        impl Hash for $ty {
+        impl<$gen1 $(: $bound)?> Eq for $ty<$gen2> {}
+        impl<$gen1 $(: $bound)?> Hash for $ty<$gen2> {
             fn hash<H: Hasher>(&self, state: &mut H) {
                 <Ref as Hash>::hash(self, state)
             }
         }
-        impl Ord for $ty {
+        impl<$gen1 $(: $bound)?> Ord for $ty<$gen2> {
             fn cmp(&self, other: &Self) -> cmp::Ordering {
                 <Ref as Ord>::cmp(self, other)
             }
         }
-        impl PartialOrd for $ty {
-            fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-        impl AsRef<[u8]> for $ty {
+        impl<$gen1 $(: $bound)?> AsRef<[u8]> for $ty<$gen2> {
             fn as_ref(&self) -> &[u8] {
                 self.bytes()
             }
         }
-        impl Borrow<[u8]> for $ty {
+        impl<$gen1 $(: $bound)?> Borrow<[u8]> for $ty<$gen2> {
             fn borrow(&self) -> &[u8] {
                 self.bytes()
             }
         }
-        impl AsMut<[u8]> for $ty {
+        impl<$gen1 $(: $bound)?> AsMut<[u8]> for $ty<$gen2> {
             fn as_mut(&mut self) -> &mut [u8] {
                 self.bytes_mut()
             }
         }
-        impl BorrowMut<[u8]> for $ty {
+        impl<$gen1 $(: $bound)?> BorrowMut<[u8]> for $ty<$gen2> {
             fn borrow_mut(&mut self) -> &mut [u8] {
                 self.bytes_mut()
             }
         }
     };
 }
-forward_traits!(Mut<'_>);
-forward_traits!(Buf);
+forward_traits!(<'a> Mut<'_>);
+forward_traits!(<A: Allocator> Buf<A>);
 
-/// Returned from [`Buf::try_of_bytes`].
+impl PartialEq for Mut<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        <Ref as PartialEq>::eq(self, other)
+    }
+}
+impl PartialOrd for Mut<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<A1: Allocator, A2: Allocator> PartialEq<Buf<A1>> for Buf<A2> {
+    fn eq(&self, other: &Buf<A1>) -> bool {
+        <Ref as PartialEq>::eq(self, other)
+    }
+}
+impl<A1: Allocator, A2: Allocator> PartialOrd<Buf<A1>> for Buf<A2> {
+    fn partial_cmp(&self, other: &Buf<A1>) -> Option<cmp::Ordering> {
+        Some(<Ref as Ord>::cmp(self, other))
+    }
+}
+
+/// Returned from [`Buf::try_of_bytes_in`].
 #[derive(Debug, Clone, Copy)]
 pub struct AllocError(pub usize);
 
@@ -384,5 +430,27 @@ impl From<AllocError> for std::io::ErrorKind {
 impl From<AllocError> for std::io::Error {
     fn from(value: AllocError) -> Self {
         std::io::Error::from(std::io::ErrorKind::from(value))
+    }
+}
+
+/// # Safety
+/// - Must act like an allocator ;)
+pub unsafe trait Allocator {
+    fn alloc(size: usize) -> Option<NonNull<u8>>;
+    fn free(ptr: NonNull<u8>);
+}
+
+/// Use [`libc`]'s allocation functions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Libc;
+
+unsafe impl Allocator for Libc {
+    fn alloc(size: usize) -> Option<NonNull<u8>> {
+        NonNull::new(unsafe { libc::malloc(size) }.cast::<u8>())
+    }
+    fn free(ptr: NonNull<u8>) {
+        unsafe {
+            libc::free(ptr.as_ptr().cast());
+        }
     }
 }
