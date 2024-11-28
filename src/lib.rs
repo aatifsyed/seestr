@@ -238,7 +238,7 @@ impl<'a> From<&'a CStr> for &'a NulTerminated {
 /// allocated with [`malloc`](libc::malloc),
 /// which is [`free`](libc::free)-ed on [`Drop`].
 #[cfg(feature = "libc")]
-#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "libc")))]
 pub type Buf = BufIn<Libc>;
 
 /// Pointer-wide,
@@ -494,11 +494,11 @@ pub unsafe trait Allocator {
 /// Use [`libc`]'s allocation functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg(feature = "libc")]
-#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "libc")))]
 pub struct Libc;
 
 #[cfg(feature = "libc")]
-#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+#[cfg_attr(docsrs, doc(cfg(feature = "libc")))]
 unsafe impl Allocator for Libc {
     fn alloc(size: usize) -> Option<NonNull<u8>> {
         NonNull::new(unsafe { libc::malloc(size) }.cast::<u8>())
