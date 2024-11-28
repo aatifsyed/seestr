@@ -1,6 +1,6 @@
 [package]
 name = "seestr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Aatif Syed <0xaatif@gmail.com>"]
 homepage = "https://crates.io/crates/seestr"
