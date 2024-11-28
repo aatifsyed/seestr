@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libc = { version = "0.2.166", default-features = false }
+libc = { version = "0.2.166", default-features = false, optional = true }
 
 [features]
-default = ["alloc", "std"]
+default = ["alloc", "std", "libc"]
+
 alloc = []
+libc = ["dep:libc"]
 std = []

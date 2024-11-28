@@ -43,7 +43,7 @@ impl NulTerminated {
         &*(ptr as *const NulTerminated)
     }
     /// The returned pointer MUST NOT outlive self.
-    pub fn as_ptr(&self) -> *const c_char {
+    pub const fn as_ptr(&self) -> *const c_char {
         self as *const Self as _
     }
     /// # Safety
@@ -57,7 +57,7 @@ impl NulTerminated {
         self as *mut Self as _
     }
     /// `true` if the buffer starts with nul.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         unsafe { *self.as_ptr() == 0 }
     }
     /// Return a shared reference to the buffer until (not including) the first nul.
@@ -70,16 +70,29 @@ impl NulTerminated {
     }
     /// The length of the buffer until (not including) the first nul.
     pub fn len(&self) -> usize {
-        unsafe { libc::strlen(self.as_ptr()) }
+        #[cfg(feature = "libc")]
+        unsafe {
+            libc::strlen(self.as_ptr())
+        }
+        #[cfg(not(feature = "libc"))]
+        {
+            let mut ct = 0;
+            let mut ptr = self.as_ptr();
+            while unsafe { *ptr } != 0 {
+                ct += 1;
+                ptr = unsafe { ptr.add(1) }
+            }
+            ct
+        }
     }
     /// The length of the buffer including the first nul.
     pub fn len_with_nul(&self) -> usize {
         unsafe { self.len().unchecked_add(1) }
     }
-    pub fn as_cstr(&self) -> &CStr {
-        unsafe { CStr::from_bytes_with_nul_unchecked(self.bytes_with_nul()) }
+    pub const fn as_cstr(&self) -> &CStr {
+        unsafe { CStr::from_ptr(self.as_ptr()) }
     }
-    pub fn from_cstr(c: &CStr) -> &Self {
+    pub const fn from_cstr(c: &CStr) -> &Self {
         unsafe { Self::from_ptr(c.as_ptr()) }
     }
     /// Access the raw bytes until (not including) the first nul.
@@ -187,6 +200,8 @@ impl<'a> From<&'a CStr> for &'a NulTerminated {
 /// owned handle to a `nul`-terminated buffer,
 /// allocated with [`malloc`](libc::malloc),
 /// which is [`free`](libc::free)-ed on [`Drop`].
+#[cfg(feature = "libc")]
+#[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
 pub type Buf = BufIn<Libc>;
 
 /// Pointer-wide,
@@ -439,8 +454,12 @@ pub unsafe trait Allocator {
 
 /// Use [`libc`]'s allocation functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg(feature = "libc")]
+#[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
 pub struct Libc;
 
+#[cfg(feature = "libc")]
+#[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
 unsafe impl Allocator for Libc {
     fn alloc(size: usize) -> Option<NonNull<u8>> {
         NonNull::new(unsafe { libc::malloc(size) }.cast::<u8>())
@@ -450,4 +469,11 @@ unsafe impl Allocator for Libc {
             libc::free(ptr.as_ptr().cast());
         }
     }
+}
+
+#[cfg(all(test, not(feature = "libc")))]
+#[test]
+fn custom_strlen() {
+    let s = NulTerminated::from_cstr(c"hello");
+    assert_eq!(s.len(), 5);
 }
