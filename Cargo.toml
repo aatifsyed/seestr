@@ -25,7 +25,7 @@ default = ["alloc", "std", "libc"]
 
 alloc = []
 libc = ["dep:libc"]
-std = []
+std = ["alloc"]
 
 [workspace]
 members = ["fuzz"]
