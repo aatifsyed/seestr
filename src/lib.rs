@@ -19,30 +19,65 @@ use core::{
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-/// Pointer-wide, owned handle to a `nul`-terminated,
-/// [`malloc`](libc::malloc)-ed buffer,
+/// Pointer-wide,
+/// owned handle to a `nul`-terminated buffer,
+/// allocated with [`malloc`](libc::malloc),
 /// which is [`free`](libc::free)-ed on [`Drop`].
+pub type Buf = BufIn<Libc>;
+
+/// Pointer-wide,
+/// owned handle to a `nul`-terminated buffer,
+/// which is freed on [`Drop`].
 ///
 /// The allocator is pluggable - see [`Allocator`].
 #[repr(transparent)]
-pub struct Buf<A: Allocator = Libc> {
+pub struct BufIn<A: Allocator = Libc> {
     ptr: NonNull<u8>,
     alloc: PhantomData<A>,
 }
 
-/// Operations with [`libc::malloc`].
-impl Buf {
+impl<A: Allocator> BufIn<A> {
     /// # Safety
     /// - `ptr` must not be null.
     /// - Invariants on [`Buf`] must be upheld.
     pub unsafe fn from_ptr(ptr: *mut c_char) -> Self {
-        Self::from_ptr_in(ptr)
+        Self {
+            ptr: NonNull::new_unchecked(ptr.cast()),
+            alloc: PhantomData,
+        }
     }
     /// Copy `src` into the heap.
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
     pub fn new(src: &CStr) -> Self {
-        Self::new_in(src)
+        Self::from_bytes(src.to_bytes())
+    }
+    /// This will add a nul terminator.
+    ///
+    /// If `src` contains an interior `0`,
+    /// future methods on this [`Buf`] will act truncated.
+    #[cfg(feature = "alloc")]
+    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+    pub fn from_bytes(src: &[u8]) -> Self {
+        match Self::try_of_bytes(src) {
+            Ok(it) => it,
+            Err(e) => e.handle(),
+        }
+    }
+    /// Copies `src` to the heap, appending an nul terminator.
+    ///
+    /// If `src` contains an interior `0`,
+    /// future methods on this [`Buf`] will act truncated.
+    ///
+    /// # Panics
+    /// - if `b`s len is [`usize::MAX`].
+    pub fn try_of_bytes(src: &[u8]) -> Result<Self, AllocError> {
+        unsafe {
+            Self::try_with_uninit(src.len(), |dst| {
+                debug_assert_eq!(src.len(), dst.len());
+                ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), dst.len());
+            })
+        }
     }
     /// Allocate a buffer of `len + 1`,
     /// passing a buffer of length `len` to the given function for initialization.
@@ -55,60 +90,7 @@ impl Buf {
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
     pub fn with(len: usize, f: impl FnOnce(&mut [u8])) -> Self {
-        Self::with_in(len, f)
-    }
-}
-
-#[expect(
-    clippy::missing_safety_doc,
-    reason = "safety is documented on the specialised impl"
-)]
-impl<A: Allocator> Buf<A> {
-    /// See [`Self::from_ptr`].
-    pub unsafe fn from_ptr_in(ptr: *mut c_char) -> Self {
-        Self {
-            ptr: NonNull::new_unchecked(ptr.cast()),
-            alloc: PhantomData,
-        }
-    }
-    /// See [`Self::new`].
-    #[cfg(feature = "alloc")]
-    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
-    pub fn new_in(src: &CStr) -> Self {
-        Self::from_bytes_in(src.to_bytes())
-    }
-    /// This will add a nul terminator.
-    ///
-    /// If `src` contains an interior `0`,
-    /// future methods on this [`Buf`] will act truncated.
-    #[cfg(feature = "alloc")]
-    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
-    pub fn from_bytes_in(src: &[u8]) -> Self {
-        match Self::try_of_bytes_in(src) {
-            Ok(it) => it,
-            Err(e) => e.handle(),
-        }
-    }
-    /// Copies `src` to the heap, appending an nul terminator.
-    ///
-    /// If `src` contains an interior `0`,
-    /// future methods on this [`Buf`] will act truncated.
-    ///
-    /// # Panics
-    /// - if `b`s len is [`usize::MAX`].
-    pub fn try_of_bytes_in(src: &[u8]) -> Result<Self, AllocError> {
-        unsafe {
-            Self::try_with_uninit_in(src.len(), |dst| {
-                debug_assert_eq!(src.len(), dst.len());
-                ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr().cast::<u8>(), dst.len());
-            })
-        }
-    }
-    /// See [`Self::with`].
-    #[cfg(feature = "alloc")]
-    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
-    pub fn with_in(len: usize, f: impl FnOnce(&mut [u8])) -> Self {
-        match Self::try_with_in(len, f) {
+        match Self::try_with(len, f) {
             Ok(it) => it,
             Err(e) => e.handle(),
         }
@@ -118,9 +100,9 @@ impl<A: Allocator> Buf<A> {
     ///
     /// # Panics
     /// - if `len` is [`usize::MAX`].
-    pub fn try_with_in(len: usize, f: impl FnOnce(&mut [u8])) -> Result<Self, AllocError> {
+    pub fn try_with(len: usize, f: impl FnOnce(&mut [u8])) -> Result<Self, AllocError> {
         unsafe {
-            Self::try_with_uninit_in(len, |it| {
+            Self::try_with_uninit(len, |it| {
                 let ptr = it.as_mut_ptr();
                 let len = it.len();
                 ptr::write_bytes(ptr, 0, len);
@@ -136,7 +118,7 @@ impl<A: Allocator> Buf<A> {
     ///
     /// # Panics
     /// - if `len` is [`usize::MAX`].
-    pub unsafe fn try_with_uninit_in(
+    pub unsafe fn try_with_uninit(
         len: usize,
         f: impl FnOnce(&mut [MaybeUninit<u8>]),
     ) -> Result<Self, AllocError> {
@@ -156,19 +138,19 @@ impl<A: Allocator> Buf<A> {
     }
 }
 
-impl<A: Allocator> Drop for Buf<A> {
+impl<A: Allocator> Drop for BufIn<A> {
     fn drop(&mut self) {
         A::free(self.ptr);
     }
 }
 
-impl<A: Allocator> ops::Deref for Buf<A> {
+impl<A: Allocator> ops::Deref for BufIn<A> {
     type Target = Mut<'static>;
     fn deref(&self) -> &Self::Target {
         unsafe { mem::transmute(self) }
     }
 }
-impl<A: Allocator> ops::DerefMut for Buf<A> {
+impl<A: Allocator> ops::DerefMut for BufIn<A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { mem::transmute(self) }
     }
@@ -370,7 +352,7 @@ macro_rules! forward_traits {
     };
 }
 forward_traits!(<'a> Mut<'_>);
-forward_traits!(<A: Allocator> Buf<A>);
+forward_traits!(<A: Allocator> BufIn<A>);
 
 impl PartialEq for Mut<'_> {
     fn eq(&self, other: &Self) -> bool {
@@ -382,13 +364,13 @@ impl PartialOrd for Mut<'_> {
         Some(self.cmp(other))
     }
 }
-impl<A1: Allocator, A2: Allocator> PartialEq<Buf<A1>> for Buf<A2> {
-    fn eq(&self, other: &Buf<A1>) -> bool {
+impl<A1: Allocator, A2: Allocator> PartialEq<BufIn<A1>> for BufIn<A2> {
+    fn eq(&self, other: &BufIn<A1>) -> bool {
         <Ref as PartialEq>::eq(self, other)
     }
 }
-impl<A1: Allocator, A2: Allocator> PartialOrd<Buf<A1>> for Buf<A2> {
-    fn partial_cmp(&self, other: &Buf<A1>) -> Option<cmp::Ordering> {
+impl<A1: Allocator, A2: Allocator> PartialOrd<BufIn<A1>> for BufIn<A2> {
+    fn partial_cmp(&self, other: &BufIn<A1>) -> Option<cmp::Ordering> {
         Some(<Ref as Ord>::cmp(self, other))
     }
 }
