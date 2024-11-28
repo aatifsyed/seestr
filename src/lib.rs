@@ -247,7 +247,7 @@ pub type Buf = BufIn<Libc>;
 ///
 /// The allocator is pluggable - see [`Allocator`].
 ///
-/// `#[repr(transparent)]` such that `Option<Buf>` has the same layout as *mut c_char.
+/// `#[repr(transparent)]` such that `Option<Buf>` has the same layout as `*mut c_char`.
 #[repr(transparent)]
 pub struct BufIn<A: Allocator> {
     ptr: NonNull<u8>,
