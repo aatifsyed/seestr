@@ -33,6 +33,7 @@
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use core::{
     alloc::Layout,
@@ -237,7 +238,7 @@ impl<'a> From<&'a CStr> for &'a NulTerminated {
 /// allocated with [`malloc`](libc::malloc),
 /// which is [`free`](libc::free)-ed on [`Drop`].
 #[cfg(feature = "libc")]
-#[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub type Buf = BufIn<Libc>;
 
 /// Pointer-wide,
@@ -265,7 +266,7 @@ impl<A: Allocator> BufIn<A> {
     }
     /// Copy `src` into the heap.
     #[cfg(feature = "alloc")]
-    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn new(src: &CStr) -> Self {
         Self::from_bytes(src.to_bytes())
     }
@@ -274,7 +275,7 @@ impl<A: Allocator> BufIn<A> {
     /// If `src` contains an interior `0`,
     /// future methods on this [`Buf`] will act truncated.
     #[cfg(feature = "alloc")]
-    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn from_bytes(src: &[u8]) -> Self {
         match Self::try_of_bytes(src) {
             Ok(it) => it,
@@ -305,7 +306,7 @@ impl<A: Allocator> BufIn<A> {
     /// # Panics
     /// - if `len` is [`isize::MAX`].
     #[cfg(feature = "alloc")]
-    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn with(len: usize, f: impl FnOnce(&mut [u8])) -> Self {
         match Self::try_with(len, f) {
             Ok(it) => it,
@@ -452,7 +453,7 @@ impl AllocError {
         Layout::array::<u8>(self.0).unwrap()
     }
     #[cfg(feature = "alloc")]
-    #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
     pub fn handle(self) -> ! {
         alloc::alloc::handle_alloc_error(self.into_layout())
     }
@@ -493,11 +494,11 @@ pub unsafe trait Allocator {
 /// Use [`libc`]'s allocation functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg(feature = "libc")]
-#[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub struct Libc;
 
 #[cfg(feature = "libc")]
-#[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 unsafe impl Allocator for Libc {
     fn alloc(size: usize) -> Option<NonNull<u8>> {
         NonNull::new(unsafe { libc::malloc(size) }.cast::<u8>())
