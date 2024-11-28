@@ -2,6 +2,20 @@
 name = "seestr"
 version = "0.1.0"
 edition = "2021"
+authors = ["Aatif Syed <0xaatif@gmail.com>"]
+homepage = "https://crates.io/crates/seestr"
+documentation = "https://docs.rs/seestr"
+repository = "https://github.com/aatifsyed/seestr"
+license = "Apache-2.0 OR MIT"
+description = "pointer-wide nul-terminated strings with ownership semantics"
+keywords = ["ffi", "nul", "c_str", "transparent"]
+categories = [
+    "rust-patterns",
+    "no-std::no-alloc",
+    "external-ffi-bindings",
+    "embedded",
+    "development-tools::ffi",
+]
 
 [dependencies]
 libc = { version = "0.2.166", default-features = false, optional = true }
