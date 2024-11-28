@@ -9,6 +9,7 @@
 //! ```
 //! Can be transcribed as follows:
 //! ```
+//! # use seestr::{NulTerminated, Buf};
 //! # #[repr(C)]
 //! # struct HasName(u8);
 //! extern "C" {
