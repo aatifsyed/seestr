@@ -10,7 +10,7 @@ use core::{
     fmt::{self, Write as _},
     hash::{Hash, Hasher},
     marker::PhantomData,
-    mem::{self, MaybeUninit},
+    mem::MaybeUninit,
     ops,
     ptr::{self, NonNull},
     slice,
@@ -18,6 +18,169 @@ use core::{
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
+
+/// A buffer that terminates at a nul byte.
+///
+/// This type is [_uninhabited_],
+/// and can only live behind a reference.
+///
+/// This may be shortened by writing nul bytes,
+/// but may never be lengthened.
+///
+/// An `&NulTerminated` is always a single pointer wide (unlike [`CStr`]).
+///
+/// [uninhabited](https://smallcultfollowing.com/babysteps/blog/2018/08/13/never-patterns-exhaustive-matching-and-uninhabited-types-oh-my/)
+#[doc(alias = "NullTerminated")]
+pub struct NulTerminated(Never);
+enum Never {}
+
+impl NulTerminated {
+    /// # Safety
+    /// - `ptr` must not be null.
+    /// - Invariants on [`NulTerminated`] must be upheld.
+    pub const unsafe fn from_ptr<'a>(ptr: *const c_char) -> &'a Self {
+        &*(ptr as *const NulTerminated)
+    }
+    /// The returned pointer MUST NOT outlive self.
+    pub fn as_ptr(&self) -> *const c_char {
+        self as *const Self as _
+    }
+    /// # Safety
+    /// - `ptr` must not be null.
+    /// - Invariants on [`NulTerminated`] must be upheld.
+    pub unsafe fn from_ptr_mut<'a>(ptr: *mut c_char) -> &'a mut Self {
+        &mut *(ptr as *mut NulTerminated)
+    }
+    /// The returned pointer MUST NOT outlive self.
+    pub fn as_ptr_mut(&mut self) -> *mut c_char {
+        self as *mut Self as _
+    }
+    /// `true` if the buffer starts with nul.
+    pub fn is_empty(&self) -> bool {
+        unsafe { *self.as_ptr() == 0 }
+    }
+    /// Return a shared reference to the buffer until (not including) the first nul.
+    pub fn bytes(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.as_ptr().cast::<u8>(), self.len()) }
+    }
+    /// Return a shared reference to the buffer including the first nul.
+    pub fn bytes_with_nul(&self) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.as_ptr().cast::<u8>(), self.len_with_nul()) }
+    }
+    /// The length of the buffer until (not including) the first nul.
+    pub fn len(&self) -> usize {
+        unsafe { libc::strlen(self.as_ptr()) }
+    }
+    /// The length of the buffer including the first nul.
+    pub fn len_with_nul(&self) -> usize {
+        unsafe { libc::strlen(self.as_ptr().cast::<c_char>()).unchecked_add(1) }
+    }
+    pub fn as_cstr(&self) -> &CStr {
+        unsafe { CStr::from_bytes_with_nul_unchecked(self.bytes_with_nul()) }
+    }
+    pub fn from_cstr(c: &CStr) -> &Self {
+        unsafe { Self::from_ptr(c.as_ptr()) }
+    }
+    /// Access the raw bytes until (not including) the first nul.
+    ///
+    /// Writing a nul in this buffer will truncate it.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        unsafe { slice::from_raw_parts_mut(self.as_ptr_mut().cast::<u8>(), self.len()) }
+    }
+    /// Access the raw bytes including the first nul.
+    ///
+    /// # Safety
+    /// - This buffer MUST contain a `nul`.
+    pub unsafe fn bytes_with_nul_mut(&mut self) -> &mut [u8] {
+        unsafe { slice::from_raw_parts_mut(self.as_ptr_mut().cast::<u8>(), self.len_with_nul()) }
+    }
+}
+
+impl fmt::Debug for NulTerminated {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.bytes().utf8_chunks() {
+            f.write_fmt(format_args!("{}", chunk.valid().escape_default()))?;
+            if !chunk.invalid().is_empty() {
+                f.write_char(char::REPLACEMENT_CHARACTER)?
+            }
+        }
+        Ok(())
+    }
+}
+impl fmt::Display for NulTerminated {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.bytes().utf8_chunks() {
+            f.write_str(chunk.valid())?;
+            if !chunk.invalid().is_empty() {
+                f.write_char(char::REPLACEMENT_CHARACTER)?
+            }
+        }
+        Ok(())
+    }
+}
+impl PartialEq for NulTerminated {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes() == other.bytes()
+    }
+}
+impl Eq for NulTerminated {}
+impl Hash for NulTerminated {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.bytes().hash(state);
+    }
+}
+impl Ord for NulTerminated {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.bytes().cmp(other.bytes())
+    }
+}
+impl PartialOrd for NulTerminated {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl AsRef<[u8]> for NulTerminated {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+impl Borrow<[u8]> for NulTerminated {
+    fn borrow(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+impl AsMut<[u8]> for NulTerminated {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.bytes_mut()
+    }
+}
+impl BorrowMut<[u8]> for NulTerminated {
+    fn borrow_mut(&mut self) -> &mut [u8] {
+        self.bytes_mut()
+    }
+}
+impl ops::Deref for NulTerminated {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.bytes()
+    }
+}
+impl ops::DerefMut for NulTerminated {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.bytes_mut()
+    }
+}
+
+impl<'a> From<&'a NulTerminated> for &'a CStr {
+    fn from(value: &'a NulTerminated) -> Self {
+        value.as_cstr()
+    }
+}
+impl<'a> From<&'a CStr> for &'a NulTerminated {
+    fn from(value: &'a CStr) -> Self {
+        NulTerminated::from_cstr(value)
+    }
+}
 
 /// Pointer-wide,
 /// owned handle to a `nul`-terminated buffer,
@@ -31,7 +194,7 @@ pub type Buf = BufIn<Libc>;
 ///
 /// The allocator is pluggable - see [`Allocator`].
 #[repr(transparent)]
-pub struct BufIn<A: Allocator = Libc> {
+pub struct BufIn<A: Allocator> {
     ptr: NonNull<u8>,
     alloc: PhantomData<A>,
 }
@@ -70,7 +233,7 @@ impl<A: Allocator> BufIn<A> {
     /// future methods on this [`Buf`] will act truncated.
     ///
     /// # Panics
-    /// - if `b`s len is [`usize::MAX`].
+    /// - if `src`s len is [`usize::MAX`].
     pub fn try_of_bytes(src: &[u8]) -> Result<Self, AllocError> {
         unsafe {
             Self::try_with_uninit(src.len(), |dst| {
@@ -145,226 +308,91 @@ impl<A: Allocator> Drop for BufIn<A> {
 }
 
 impl<A: Allocator> ops::Deref for BufIn<A> {
-    type Target = Ref;
+    type Target = NulTerminated;
     fn deref(&self) -> &Self::Target {
-        unsafe { Ref::from_ptr(self.ptr.as_ptr().cast()) }
+        unsafe { self.ptr.cast::<NulTerminated>().as_ref() }
+    }
+}
+impl<A: Allocator> ops::DerefMut for BufIn<A> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.ptr.cast::<NulTerminated>().as_mut() }
     }
 }
 
-enum Never {}
-
-/// An [`&Ref`](Ref) is a pointer-wide,
-/// non-owned,
-/// shared handle to a `nul`-terminated buffer that lives for `'a`.
-///
-/// Implements [`fmt::Display`].
-pub struct Ref(Never);
-
-impl Ref {
-    /// # Safety
-    /// - `ptr` must not be null.
-    /// - Invariants on [`Ref`] must be upheld.
-    pub const unsafe fn from_ptr<'a>(ptr: *const c_char) -> &'a Self {
-        mem::transmute(ptr)
-    }
-    /// The buffer starts with nul.
-    pub fn is_empty(&self) -> bool {
-        unsafe { *self.as_ptr() == 0 }
-    }
-    /// Return a shared reference to the buffer until (not including) the first nul.
-    pub fn bytes(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.as_ptr().cast::<u8>(), self.len()) }
-    }
-    /// Return a shared reference to the buffer including the first nul.
-    pub fn bytes_with_nul(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.as_ptr().cast::<u8>(), self.len_with_nul()) }
-    }
-    /// The length of the buffer until (not including) the first nul.
-    pub fn len(&self) -> usize {
-        unsafe { libc::strlen(self.as_ptr()) }
-    }
-    /// The length of the buffer including the first nul.
-    pub fn len_with_nul(&self) -> usize {
-        unsafe { libc::strlen(self.as_ptr().cast::<c_char>()).unchecked_add(1) }
-    }
-    pub fn as_cstr(&self) -> &CStr {
-        unsafe { CStr::from_bytes_with_nul_unchecked(self.bytes_with_nul()) }
-    }
-    pub fn from_cstr(c: &CStr) -> &Self {
-        unsafe { Self::from_ptr(c.as_ptr()) }
-    }
-    pub fn as_ptr(&self) -> *const c_char {
-        unsafe { mem::transmute(self) }
-    }
-}
-
-impl fmt::Debug for Ref {
+impl<A: Allocator> fmt::Debug for BufIn<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for chunk in self.bytes().utf8_chunks() {
-            f.write_fmt(format_args!("{}", chunk.valid().escape_default()))?;
-            if !chunk.invalid().is_empty() {
-                f.write_char(char::REPLACEMENT_CHARACTER)?
-            }
-        }
-        Ok(())
+        NulTerminated::fmt(self, f)
     }
 }
-impl fmt::Display for Ref {
+impl<A: Allocator> fmt::Display for BufIn<A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for chunk in self.bytes().utf8_chunks() {
-            f.write_str(chunk.valid())?;
-            if !chunk.invalid().is_empty() {
-                f.write_char(char::REPLACEMENT_CHARACTER)?
-            }
-        }
-        Ok(())
+        NulTerminated::fmt(self, f)
     }
 }
-impl PartialEq for Ref {
-    fn eq(&self, other: &Self) -> bool {
-        self.bytes() == other.bytes()
+impl<A1: Allocator, A2: Allocator> PartialEq<BufIn<A2>> for BufIn<A1> {
+    fn eq(&self, other: &BufIn<A2>) -> bool {
+        NulTerminated::eq(self, other)
     }
 }
-impl Eq for Ref {}
-impl Hash for Ref {
+impl<A: Allocator> Eq for BufIn<A> {}
+impl<A: Allocator> Hash for BufIn<A> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.bytes().hash(state);
+        NulTerminated::hash(self, state)
     }
 }
-impl Ord for Ref {
+impl<A: Allocator> Ord for BufIn<A> {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.bytes().cmp(other.bytes())
+        NulTerminated::cmp(self, other)
     }
 }
-impl PartialOrd for Ref {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
+impl<A1: Allocator, A2: Allocator> PartialOrd<BufIn<A2>> for BufIn<A1> {
+    fn partial_cmp(&self, other: &BufIn<A2>) -> Option<cmp::Ordering> {
+        NulTerminated::partial_cmp(self, other)
     }
 }
-impl AsRef<[u8]> for Ref {
+impl<A: Allocator> AsRef<NulTerminated> for BufIn<A> {
+    fn as_ref(&self) -> &NulTerminated {
+        self
+    }
+}
+impl<A: Allocator> Borrow<NulTerminated> for BufIn<A> {
+    fn borrow(&self) -> &NulTerminated {
+        self
+    }
+}
+impl<A: Allocator> AsMut<NulTerminated> for BufIn<A> {
+    fn as_mut(&mut self) -> &mut NulTerminated {
+        self
+    }
+}
+impl<A: Allocator> BorrowMut<NulTerminated> for BufIn<A> {
+    fn borrow_mut(&mut self) -> &mut NulTerminated {
+        self
+    }
+}
+impl<A: Allocator> AsRef<[u8]> for BufIn<A> {
     fn as_ref(&self) -> &[u8] {
-        self.bytes()
+        NulTerminated::as_ref(self)
     }
 }
-impl Borrow<[u8]> for Ref {
+impl<A: Allocator> Borrow<[u8]> for BufIn<A> {
     fn borrow(&self) -> &[u8] {
-        self.bytes()
+        NulTerminated::borrow(self)
+    }
+}
+impl<A: Allocator> AsMut<[u8]> for BufIn<A> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        NulTerminated::as_mut(self)
+    }
+}
+impl<A: Allocator> BorrowMut<[u8]> for BufIn<A> {
+    fn borrow_mut(&mut self) -> &mut [u8] {
+        NulTerminated::borrow_mut(self)
     }
 }
 
-/// An [`&Mut`](Mut) is a pointer-wide,
-/// non-owned,
-/// exclusive handle to a `nul`-terminated buffer that lives for `'a`.
-///
-/// Implements [`fmt::Display`].
-pub struct Mut(Never);
-
-impl Mut {
-    /// # Safety
-    /// - `ptr` must not be null.
-    /// - Invariants on [`Mut`] must be upheld.
-    pub const unsafe fn from_ptr<'a>(ptr: *mut c_char) -> &'a Self {
-        Self {
-            ptr: NonNull::new_unchecked(ptr.cast()),
-            life: PhantomData,
-        }
-    }
-    /// Return an exclusive reference to the buffer until (not including) the first nul.
-    ///
-    /// Writing a nul in this buffer will truncate it.
-    pub fn bytes_mut(&mut self) -> &mut [u8] {
-        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len()) }
-    }
-    /// Return a exclusive reference to the buffer including the first nul.
-    ///
-    /// # Safety
-    /// - This buffer MUST contain a `nul`.
-    pub unsafe fn bytes_with_nul_mut(&mut self) -> &mut [u8] {
-        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len_with_nul()) }
-    }
-    pub fn as_mut_ptr(&mut self) -> *mut c_char {
-        self.ptr.as_ptr().cast()
-    }
-}
-
-impl<'a> ops::Deref for Mut<'a> {
-    type Target = Ref<'a>;
-    fn deref(&self) -> &Self::Target {
-        unsafe { mem::transmute(self) }
-    }
-}
-
-macro_rules! forward_traits {
-    (<$gen1:tt $(: $bound:ident)?>$ty:ident<$gen2:tt>) => {
-        impl<$gen1 $(: $bound)?> fmt::Debug for $ty<$gen2> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                <Ref as fmt::Debug>::fmt(self, f)
-            }
-        }
-        impl<$gen1 $(: $bound)?> fmt::Display for $ty<$gen2> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                <Ref as fmt::Display>::fmt(self, f)
-            }
-        }
-        impl<$gen1 $(: $bound)?> Eq for $ty<$gen2> {}
-        impl<$gen1 $(: $bound)?> Hash for $ty<$gen2> {
-            fn hash<H: Hasher>(&self, state: &mut H) {
-                <Ref as Hash>::hash(self, state)
-            }
-        }
-        impl<$gen1 $(: $bound)?> Ord for $ty<$gen2> {
-            fn cmp(&self, other: &Self) -> cmp::Ordering {
-                <Ref as Ord>::cmp(self, other)
-            }
-        }
-        impl<$gen1 $(: $bound)?> AsRef<[u8]> for $ty<$gen2> {
-            fn as_ref(&self) -> &[u8] {
-                self.bytes()
-            }
-        }
-        impl<$gen1 $(: $bound)?> Borrow<[u8]> for $ty<$gen2> {
-            fn borrow(&self) -> &[u8] {
-                self.bytes()
-            }
-        }
-        impl<$gen1 $(: $bound)?> AsMut<[u8]> for $ty<$gen2> {
-            fn as_mut(&mut self) -> &mut [u8] {
-                self.bytes_mut()
-            }
-        }
-        impl<$gen1 $(: $bound)?> BorrowMut<[u8]> for $ty<$gen2> {
-            fn borrow_mut(&mut self) -> &mut [u8] {
-                self.bytes_mut()
-            }
-        }
-    };
-}
-// forward_traits!(<'a> Mut<'_>);
-// forward_traits!(<A: Allocator> BufIn<A>);
-
-impl PartialEq for Mut<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        <Ref as PartialEq>::eq(self, other)
-    }
-}
-impl PartialOrd for Mut<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-// impl<A1: Allocator, A2: Allocator> PartialEq<BufIn<A1>> for BufIn<A2> {
-//     fn eq(&self, other: &BufIn<A1>) -> bool {
-//         <Ref as PartialEq>::eq(self, other)
-//     }
-// }
-// impl<A1: Allocator, A2: Allocator> PartialOrd<BufIn<A1>> for BufIn<A2> {
-//     fn partial_cmp(&self, other: &BufIn<A1>) -> Option<cmp::Ordering> {
-//         Some(<Ref as Ord>::cmp(self, other))
-//     }
-// }
-
-/// Returned from [`Buf::try_of_bytes_in`].
-#[derive(Debug, Clone, Copy)]
+/// Returned from [`BufIn::try_of_bytes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AllocError(pub usize);
 
 impl AllocError {
