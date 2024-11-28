@@ -1,4 +1,35 @@
 //! Pointer-wide nul-terminated strings for use in FFI.
+//!
+//! The following C API:
+//! ```c
+//! char *create(void); // may return nul
+//! void destroy(char *);
+//! char *get_name(struct has_name *); // may return nul
+//! char *version(void); // never null
+//! ```
+//! Can be transcribed as follows:
+//! ```
+//! # #[repr(C)]
+//! # struct HasName(u8);
+//! extern "C" {
+//!     fn create() -> Option<Buf>;
+//!     fn destroy(_: Buf);
+//!     fn get_name(_: &HasName) -> Option<&NulTerminated>;
+//!     fn version() -> &'static NulTerminated;
+//! }
+//! ```
+//! As opposed to:
+//! ```
+//! # use core::ffi::{c_char};
+//! # #[repr(C)]
+//! # struct HasName(u8);
+//! extern "C" {
+//!     fn create() -> *mut c_char;
+//!     fn destroy(_: *mut c_char);
+//!     fn get_name(_: *mut HasName) -> *mut c_char;
+//!     fn version() -> *mut c_char;
+//! }
+//! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -6,7 +37,7 @@ use core::{
     alloc::Layout,
     borrow::{Borrow, BorrowMut},
     cmp,
-    ffi::{c_char, CStr},
+    ffi::{c_char, c_void, CStr},
     fmt::{self, Write as _},
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -22,18 +53,22 @@ extern crate alloc;
 /// A buffer that terminates at a nul byte,
 /// with a length less than [`isize::MAX`].
 ///
-/// This type is [_uninhabited_],
+/// This type is not constructable,
 /// and can only live behind a reference.
 ///
-/// This may be shortened by writing nul bytes into it,
+/// The backing buffer MUST live as long as that reference.
+///
+/// The buffer may be shortened by writing nul bytes into it,
 /// but may never be lengthened.
 ///
 /// A `&NulTerminated` is always a single pointer wide (unlike [`CStr`]).
-///
-/// [uninhabited](https://smallcultfollowing.com/babysteps/blog/2018/08/13/never-patterns-exhaustive-matching-and-uninhabited-types-oh-my/)
 #[doc(alias = "NullTerminated")]
-pub struct NulTerminated(Never);
-enum Never {}
+#[repr(transparent)]
+pub struct NulTerminated(
+    // Use c_void so users don't get `improper_ctypes` lints.
+    // Ideally this should be uninhabited.
+    c_void,
+);
 
 impl NulTerminated {
     /// # Safety
@@ -209,6 +244,8 @@ pub type Buf = BufIn<Libc>;
 /// which is freed on [`Drop`].
 ///
 /// The allocator is pluggable - see [`Allocator`].
+///
+/// `#[repr(transparent)]` such that `Option<Buf>` has the same layout as *mut c_char.
 #[repr(transparent)]
 pub struct BufIn<A: Allocator> {
     ptr: NonNull<u8>,
