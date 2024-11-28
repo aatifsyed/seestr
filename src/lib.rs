@@ -149,12 +149,14 @@ impl NulTerminated {
 
 impl fmt::Debug for NulTerminated {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("\"")?;
         for chunk in self.bytes().utf8_chunks() {
             f.write_fmt(format_args!("{}", chunk.valid().escape_default()))?;
             if !chunk.invalid().is_empty() {
                 f.write_char(char::REPLACEMENT_CHARACTER)?
             }
         }
+        f.write_str("\"")?;
         Ok(())
     }
 }
