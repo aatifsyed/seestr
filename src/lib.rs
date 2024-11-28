@@ -19,15 +19,16 @@ use core::{
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-/// A buffer that terminates at a nul byte.
+/// A buffer that terminates at a nul byte,
+/// with a length less than [`isize::MAX`].
 ///
 /// This type is [_uninhabited_],
 /// and can only live behind a reference.
 ///
-/// This may be shortened by writing nul bytes,
+/// This may be shortened by writing nul bytes into it,
 /// but may never be lengthened.
 ///
-/// An `&NulTerminated` is always a single pointer wide (unlike [`CStr`]).
+/// A `&NulTerminated` is always a single pointer wide (unlike [`CStr`]).
 ///
 /// [uninhabited](https://smallcultfollowing.com/babysteps/blog/2018/08/13/never-patterns-exhaustive-matching-and-uninhabited-types-oh-my/)
 #[doc(alias = "NullTerminated")]
@@ -73,7 +74,7 @@ impl NulTerminated {
     }
     /// The length of the buffer including the first nul.
     pub fn len_with_nul(&self) -> usize {
-        unsafe { libc::strlen(self.as_ptr().cast::<c_char>()).unchecked_add(1) }
+        unsafe { self.len().unchecked_add(1) }
     }
     pub fn as_cstr(&self) -> &CStr {
         unsafe { CStr::from_bytes_with_nul_unchecked(self.bytes_with_nul()) }
@@ -233,7 +234,7 @@ impl<A: Allocator> BufIn<A> {
     /// future methods on this [`Buf`] will act truncated.
     ///
     /// # Panics
-    /// - if `src`s len is [`usize::MAX`].
+    /// - if `src`s len is [`isize::MAX`].
     pub fn try_of_bytes(src: &[u8]) -> Result<Self, AllocError> {
         unsafe {
             Self::try_with_uninit(src.len(), |dst| {
@@ -249,7 +250,7 @@ impl<A: Allocator> BufIn<A> {
     /// future methods on this [`Buf`] will act truncated.
     ///
     /// # Panics
-    /// - if `len` is [`usize::MAX`].
+    /// - if `len` is [`isize::MAX`].
     #[cfg(feature = "alloc")]
     #[cfg_attr(docsrs, doc_cfg(feature = "alloc"))]
     pub fn with(len: usize, f: impl FnOnce(&mut [u8])) -> Self {
@@ -262,8 +263,9 @@ impl<A: Allocator> BufIn<A> {
     /// passing a buffer of length `len` to the given function for initialization.
     ///
     /// # Panics
-    /// - if `len` is [`usize::MAX`].
+    /// - if `len` is [`isize::MAX`].
     pub fn try_with(len: usize, f: impl FnOnce(&mut [u8])) -> Result<Self, AllocError> {
+        assert_ne!(len, isize::MAX as usize);
         unsafe {
             Self::try_with_uninit(len, |it| {
                 let ptr = it.as_mut_ptr();
@@ -278,15 +280,12 @@ impl<A: Allocator> BufIn<A> {
     ///
     /// # Safety
     /// - `f` must initialize the buffer it's passed.
-    ///
-    /// # Panics
-    /// - if `len` is [`usize::MAX`].
+    /// - `len` must be less than [`isize::MAX`].
     pub unsafe fn try_with_uninit(
         len: usize,
         f: impl FnOnce(&mut [MaybeUninit<u8>]),
     ) -> Result<Self, AllocError> {
-        let (len_with_nul, overflow) = len.overflowing_add(1);
-        assert!(!overflow, "huge slice");
+        let len_with_nul = len + 1;
         let ptr = A::alloc(len_with_nul)
             .ok_or(AllocError(len_with_nul))?
             .cast::<u8>();
