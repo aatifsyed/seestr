@@ -342,7 +342,7 @@ impl<A: Allocator> BufIn<A> {
         f: impl FnOnce(&mut [MaybeUninit<u8>]),
     ) -> Result<Self, AllocError> {
         let len_with_nul = len + 1;
-        let ptr = A::alloc(len_with_nul)
+        let ptr = A::alloc_unaligned(len_with_nul)
             .ok_or(AllocError(len_with_nul))?
             .cast::<u8>();
         unsafe { ptr.add(len).write(0) }; // terminate
@@ -358,7 +358,7 @@ impl<A: Allocator> BufIn<A> {
 
 impl<A: Allocator> Drop for BufIn<A> {
     fn drop(&mut self) {
-        A::free(self.ptr);
+        unsafe { A::free(self.ptr) }
     }
 }
 
@@ -489,8 +489,16 @@ impl From<AllocError> for std::io::Error {
 /// # Safety
 /// - Must act like an allocator ;)
 pub unsafe trait Allocator {
-    fn alloc(size: usize) -> Option<NonNull<u8>>;
-    fn free(ptr: NonNull<u8>);
+    /// # Safety
+    /// - `size` must be less than [`isize::MAX`].
+    unsafe fn alloc_unaligned(size: usize) -> Option<NonNull<u8>>;
+    /// # Safety
+    /// - `size` must be less than [`isize::MAX`].
+    /// - `align` must be a power of two, and greater than `size_of::<c_void>()`.
+    unsafe fn alloc_aligned(size: usize, align: usize) -> Option<NonNull<u8>>;
+    /// # Safety
+    /// - `ptr` must have been from a call to [`Allocator::alloc_aligned`] or [`Allocator::alloc_unaligned`].
+    unsafe fn free(ptr: NonNull<u8>);
 }
 
 /// Use [`libc`]'s allocation functions.
@@ -502,13 +510,16 @@ pub struct Libc;
 #[cfg(feature = "libc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "libc")))]
 unsafe impl Allocator for Libc {
-    fn alloc(size: usize) -> Option<NonNull<u8>> {
-        NonNull::new(unsafe { libc::malloc(size) }.cast::<u8>())
+    unsafe fn alloc_unaligned(size: usize) -> Option<NonNull<u8>> {
+        NonNull::new(unsafe { libc::malloc(size).cast::<u8>() })
     }
-    fn free(ptr: NonNull<u8>) {
-        unsafe {
-            libc::free(ptr.as_ptr().cast());
-        }
+    unsafe fn alloc_aligned(size: usize, align: usize) -> Option<NonNull<u8>> {
+        let mut ptr = ptr::null_mut();
+        unsafe { libc::posix_memalign(&mut ptr, align, size) };
+        NonNull::new(ptr.cast::<u8>())
+    }
+    unsafe fn free(ptr: NonNull<u8>) {
+        unsafe { libc::free(ptr.as_ptr().cast()) }
     }
 }
 
